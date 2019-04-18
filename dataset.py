@@ -1,10 +1,9 @@
 from pathlib import Path
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Tuple
 
 import librosa
 import numpy as np
 import pandas as pd
-from torchvision.models import inception
 from torch.utils.data import Dataset
 
 import constants
@@ -12,21 +11,27 @@ import constants
 
 class ExtractStft(object):
     def __call__(self, flac: np.ndarray) -> np.ndarray:
-        stft = ExtractStft.get_stft(flac)
+        stft, _ = ExtractStft.get_stft(flac)
         return stft
 
     @staticmethod
-    def get_stft(flac: np.ndarray) -> np.ndarray:
+    def get_stft(flac: np.ndarray) -> Tuple[np.ndarray, float]:
         fouriered = librosa.stft(flac, n_fft=constants.LIBRISPEECH_WINDOW_SIZE,
                                  win_length=constants.LIBRISPEECH_WINDOW_SIZE)
 
         mag, phase = librosa.magphase(fouriered)
-        mag = np.power(mag, 1 / 8)
-        mag = 1 - mag / mag.max() * 255
-        ph = np.angle(phase) / np.pi * 255
+        mag = np.power(mag, constants.MAGNITUDE_NONLINEARITY)
+
+        mag_max_value = mag.max()
+
+        mag = (np.flipud((1 - mag / mag_max_value)) - 0.5) * 2
+        mag -= constants.DATA_MEANS[0]
+
+        ph = np.flipud(np.angle(phase) / np.pi)
+        ph -= constants.DATA_MEANS[1]
 
         stacked = np.stack((mag, ph), axis=-1)
-        return stacked
+        return stacked, mag_max_value
 
 
 class RandomCrop(object):

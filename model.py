@@ -16,8 +16,6 @@ class ResidualBlock2d(nn.Module):
             ("relu_1", nn.ReLU())
         )))
 
-        self.drop = nn.Sequential(OrderedDict((("drop_1", nn.Dropout(0.1)),)))
-
         self.conv_2 = nn.Sequential(OrderedDict((
             ("conv_2", nn.Conv2d(in_filters, out_filters, (kernel_size, kernel_size),
                                  padding=(kernel_size // 2, kernel_size // 2), stride=(stride, stride))),
@@ -39,47 +37,6 @@ class ResidualBlock2d(nn.Module):
 
     def forward(self, inputs):
         x = self.conv_1(inputs)
-        x = self.drop(x)
-        x = self.conv_2(x)
-        if self.should_add_input:
-            x = self.linear_transform(inputs) + x
-        return self.out_relu(x)
-
-
-class ResidualBlock1d(nn.Module):
-    def __init__(self, in_filters: int, out_filters: int, kernel_size: int, stride: int):
-        super().__init__()
-        self.conv_1 = nn.Sequential(OrderedDict((
-            ("conv_1", nn.Conv1d(in_filters, in_filters, kernel_size,
-                                 padding=kernel_size // 2)),
-            ("batchnorm_1", nn.BatchNorm1d(in_filters)),
-            ("relu_1", nn.ReLU())
-        )))
-
-        self.drop = nn.Sequential(OrderedDict((("drop_1", nn.Dropout(0.1)),)))
-
-        self.conv_2 = nn.Sequential(OrderedDict((
-            ("conv_2", nn.Conv1d(in_filters, out_filters, kernel_size,
-                                 padding=kernel_size // 2, stride=stride)),
-            ("batchnorm_2", nn.BatchNorm1d(out_filters)),
-        )))
-
-        self.out_relu = nn.Sequential(OrderedDict((("relu_2", nn.ReLU()),)))
-        self.stride = stride
-        self.should_add_input = True
-
-        if stride > 1 or out_filters != in_filters:
-            self.linear_transform = nn.Sequential(
-                OrderedDict((("conv_input", nn.Conv1d(in_filters, out_filters, 1, stride=stride)),))
-            )
-            if stride > 1:
-                self.should_add_input = False
-        else:
-            self.linear_transform = lambda x: x
-
-    def forward(self, inputs):
-        x = self.conv_1(inputs)
-        x = self.drop(x)
         x = self.conv_2(x)
         if self.should_add_input:
             x = self.linear_transform(inputs) + x

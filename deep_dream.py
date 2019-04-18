@@ -1,20 +1,20 @@
 import os
 from functools import partial
-from typing import Iterable, Tuple, Optional
+from typing import Iterable, Tuple, Optional, Union
 
+import cv2
 import librosa
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.ndimage as nd
 import torch
 import torch.nn as nn
 import tqdm
 from sklearn.base import TransformerMixin, BaseEstimator
+from dataset import ExtractStft
 from sklearn.pipeline import Pipeline
 from skorch.net import NeuralNet
 
 import constants
-from dataset import ExtractStft
 from model import Classifier
 from pytorch_extensions import roll
 
@@ -37,11 +37,11 @@ class DataPreprocessor(TransformerMixin, BaseEstimator):
         return self
 
     @classmethod
-    def transform(cls, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int]]:
+    def transform(cls, x: Iterable[Tuple[np.ndarray, int, float]]) -> Iterable[Tuple[np.ndarray, int, float]]:
         output = []
         for signal, sample_rate in x:
-            stacked = ExtractStft.get_stft(signal)
-            output.append((stacked, sample_rate))
+            stacked, mag_max_value = ExtractStft.get_stft(signal)
+            output.append((stacked[:, :2000], sample_rate, mag_max_value))
         return output
 
 
@@ -50,22 +50,20 @@ class Model(TransformerMixin, BaseEstimator):
                  model_path: str,
                  block_name: str,
                  number_of_iterations: int,
-                 framing_window_step: int,
-                 optimisation_step_size: float,
+                 optimisation_step_size: float = 1.5,
+                 n_octaves: int = 4,
+                 octave_scale: float = 1.4,
                  use_gpu: bool = False,
-                 batch_size: int = 8,
-                 jitter: int = 3,
                  verbose: bool = False,
                  seed: Optional[int] = None):
         self._model_path = model_path
-        self._framing_window_step = framing_window_step
         self._use_gpu = use_gpu
         self._block_name = block_name
+        self._n_octaves = n_octaves
+        self._octave_scale = octave_scale
         self._verbose = verbose
         self._number_of_iterations = number_of_iterations
         self._np_rng = np.random.RandomState(seed)
-        self._jitter = jitter
-        self._batch_size = batch_size
         self._optimisation_step_size = optimisation_step_size
 
         self._available_layers = {}
@@ -93,146 +91,71 @@ class Model(TransformerMixin, BaseEstimator):
     def fit(self, x, y, **fit_params):
         return self
 
-    def transform(self, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int]]:
+    def transform(self, x: Iterable[Tuple[np.ndarray, int, float]]) -> Iterable[Tuple[np.ndarray, int, float]]:
         output = []
-        for stft, sample_rate in x:
+        for stft, sample_rate, mag_max_value in x:
             prediction = self._transform_single_normal_deep_dream(stft)
-            output.append((prediction, sample_rate))
+            output.append((prediction, sample_rate, mag_max_value))
         return output
 
     def _transform_single_normal_deep_dream(self, stft: np.ndarray) -> np.ndarray:
-        stft = torch.from_numpy(stft).contiguous().float()
-        width = stft.size(1)
-        casted_width = int(width / constants.STFT_CROP_WIDTH) * constants.STFT_CROP_WIDTH
+        octaves = []
+        for i in range(self._n_octaves - 1):
+            hw = stft.shape[:-1]
+            lo = self.resize_stft(stft, np.int32(np.float32(hw) / self._octave_scale))
+            hi = stft - self.resize_stft(lo, hw)
+            stft = lo
+            octaves.append(hi)
 
-        stft = stft[:, :casted_width]
-        # stft = torch.zeros_like(stft)
-        # stft.normal_(0, 0.01)
-        stft = stft.permute(2, 0, 1)
-        if self._use_gpu:
-            stft = stft.cuda()
-        octaves = [stft]
-
-        detail = torch.zeros_like(octaves[-1]).contiguous().float()
-        if self._use_gpu:
-            detail = detail.cuda()
-
-        output_data = stft
-        for octave, octave_base in enumerate(octaves[::-1]):
-            if self._verbose:
-                print(f"Trying octave: {octave + 1} / {len(octaves)}")
-            length = octave_base.size(-1)
+        for octave in tqdm.trange(self._n_octaves, desc="Image optimisation"):
             if octave > 0:
-                rescaled_detail = nd.zoom(detail, length / len(detail), order=2)
-                detail = torch.from_numpy(rescaled_detail).contiguous().float()
-            output_data = octave_base + detail
-            for _ in tqdm.tqdm(range(self._number_of_iterations), total=self._number_of_iterations,
-                               disable=not self._verbose):
-                output_data = self._make_step(output_data)
-            detail = output_data - octave_base
-        plt.imshow(output_data[0])
-        plt.show()
-        plt.imshow(detail[0])
-        plt.show()
-        output_data = output_data.permute(1, 2, 0)
-        return output_data.numpy()
+                hi = octaves[-octave]
+                stft = self.resize_stft(stft, hi.shape[:-1]) + hi
 
-    def _make_step(self, stft: torch.Tensor) -> torch.Tensor:
-        random_shift = self._np_rng.randint(-self._jitter, self._jitter + 1)
-        stft = roll(stft, random_shift, 2)
-
-        current_min, current_max = stft.min(), stft.max()
-        frames = self._generate_frames(stft)
-
-        grads = torch.zeros_like(frames)
-        self._classifier.eval()
-
-        for i in range(0, len(frames), self._batch_size):
-            start_index = i
-            end_index = min(i + self._batch_size, len(frames))
-            batch = frames[start_index:end_index]
-            batch.requires_grad = True
+            stft = torch.from_numpy(stft).float().contiguous()
             if self._use_gpu:
-                batch = batch.cuda()
+                stft = stft.cuda()
+            stft = stft.permute((2, 0, 1))
 
-            self._classifier(batch)
+            for i in tqdm.trange(self._number_of_iterations, desc="Octave optimisation"):
+                g = self.calc_grad_tiled(stft)
+                stft += g * (self._optimisation_step_size / (torch.abs(g).mean() + 1e-7))
 
-            layer_output = self._available_layers[self._block_name][:, 0:2]
-            objective_output = self._objective(layer_output)
-            objective_output.backward()
+            stft = stft.cpu().numpy().transpose((1, 2, 0))
 
-            batch_grad = batch.grad.detach().clone()
-            batch.grad.zero_()
-            grads[start_index:end_index] = batch_grad
-
-        full_grad = self._restore_stft_shape(grads, stft)
-        stft += self._optimisation_step_size / torch.mean(torch.abs(full_grad)) * full_grad
-        stft = torch.clamp(stft, current_min, current_max)
-        stft = roll(stft, -random_shift, 2)
         return stft
 
-    def calc_grad_tiled(self, stft: torch.Tensor, tile_size: int = 512) -> torch.Tensor:
+    def calc_grad_tiled(self, stft: torch.Tensor, tile_size: int = 128) -> torch.Tensor:
         h, w = stft.shape[1:]
-        sx, sy = self._np_rng.randint(tile_size, size=2)
+        sx, sy = self._np_rng.randint(5, size=2)
         stft_shift = roll(roll(stft, sx, axis=2), sy, axis=1)
         grads = torch.zeros_like(stft)
         for y in range(0, max(h - tile_size // 2, tile_size), tile_size):
             for x in range(0, max(w - tile_size // 2, tile_size), tile_size):
                 frame = stft_shift[:, y:y + tile_size, x:x + tile_size]
-                frame = frame.expand(1, -1)
-                self._classifier(frame)
+                frame.requires_grad = True
+                self._classifier(frame[None])
 
-                layer_output = self._available_layers[self._block_name][:, 0:2]
+                layer_output = self._available_layers[self._block_name][0, 16]
                 objective_output = self._objective(layer_output)
                 objective_output.backward()
 
-                grad = frame[0].grad.detach().clone()
+                frame.requires_grad = False
+                grad = frame.grad.detach().clone()
                 grads[:, y:y + tile_size, x:x + tile_size] = grad
-        return roll(roll(grads, -sx, axis=2), -sy, axis=1)
+        result = roll(roll(grads, -sx, axis=2), -sy, axis=1)
+        return result
 
     @classmethod
     def _objective(cls, data: torch.Tensor) -> torch.Tensor:
+        data = data * (torch.log(data + 2) < 0.8 * torch.max(data + 2)).float()
         return data.mean()
 
-    def _generate_frames(self, stft: torch.Tensor) -> torch.Tensor:
-        # split signals into chunks
-        number_of_frames = int((stft.size(2) - constants.STFT_CROP_WIDTH) / self._framing_window_step + 1)
-        frames = torch.zeros(
-            (number_of_frames, 2, constants.LIBRISPEECH_COMPONENTS, constants.STFT_CROP_WIDTH)).float().contiguous()
-
-        if self._use_gpu:
-            frames = frames.cuda()
-
-        beginning_of_sample = 0
-        end_of_sample = constants.STFT_CROP_WIDTH
-        frame_count = 0
-
-        while end_of_sample < stft.size(2):
-            frames[frame_count] = stft[:, :, beginning_of_sample:end_of_sample]
-            beginning_of_sample = beginning_of_sample + self._framing_window_step
-            end_of_sample = beginning_of_sample + constants.STFT_CROP_WIDTH
-            frame_count = frame_count + 1
-
-        return frames
-
-    def _restore_stft_shape(self, frames: torch.Tensor, original_signal: torch.Tensor) -> torch.Tensor:
-        restored_signal = torch.zeros((2, original_signal.size(1), len(frames) * constants.STFT_CROP_WIDTH),
-                                      dtype=original_signal.dtype)
-        if self._use_gpu:
-            restored_signal = restored_signal.cuda()
-        offset = 0
-        previous_ending_offset = np.inf
-        for frame in frames:
-            input_slice = slice(offset, offset + constants.STFT_CROP_WIDTH)
-            restored_signal[:, :, input_slice] = frame
-
-            if previous_ending_offset < offset:
-                overlap_slice = slice(offset, previous_ending_offset)
-                restored_signal[:, :, overlap_slice] /= 2
-
-            previous_ending_offset = input_slice.stop
-            offset += self._framing_window_step
-        return restored_signal
+    @classmethod
+    def resize_stft(cls, stft: np.ndarray, hw_desired_size: Union[Tuple, np.ndarray]) -> np.ndarray:
+        mag = cv2.resize(stft[..., 0], tuple(hw_desired_size[::-1]))
+        phase = cv2.resize(stft[..., 1], tuple(hw_desired_size[::-1]))
+        return np.stack((mag, phase), axis=-1)
 
 
 class Denormalize(TransformerMixin, BaseEstimator):
@@ -242,16 +165,18 @@ class Denormalize(TransformerMixin, BaseEstimator):
     @classmethod
     def transform(cls, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int]]:
         output = []
-        for stft, fs in x:
+        for stft, fs, mag_max_value in x:
+            stft = np.flipud(stft)
             mag, phase = np.split(stft, 2, axis=-1)
             mag, phase = mag[..., 0], phase[..., 0]
 
-            mag = np.expm1(mag)
-            phase *= np.pi
-            real = mag * np.cos(phase)
-            imag = mag * np.sin(phase)
+            mag = 1 - ((mag + constants.DATA_MEANS[0]) / 2 + 0.5)
+            mag *= mag_max_value
+            mag = np.power(mag, 1 / constants.MAGNITUDE_NONLINEARITY)
 
-            stft = real + 1j * imag
+            phase = (phase + constants.DATA_MEANS[1]) * np.pi
+
+            stft = mag * np.exp(1j * phase)
             unfouriered = librosa.istft(stft, win_length=constants.LIBRISPEECH_WINDOW_SIZE)
             output.append((unfouriered, fs))
         return output
@@ -279,12 +204,11 @@ def get_processing_pipeline(model_path: str) -> Pipeline:
         ("data load", DataLoader()),
         ("data processor", DataPreprocessor()),
         ("deep dream", Model(
-            block_name="residual_4b",
+            block_name="residual_5a",
             model_path=model_path,
+            n_octaves=2,
             number_of_iterations=20,
             optimisation_step_size=0.5,
-            framing_window_step=constants.STFT_CROP_WIDTH,
-            jitter=8,
             verbose=True,
             use_gpu=False,
         )),
