@@ -11,4 +11,3 @@ SPEAKER_DATA_PATH = "data/processed/LibriSpeech/SPEAKERS.TXT"
 NUMBER_OF_CLASSES = 2  # female, male
 
 MAGNITUDE_NONLINEARITY = 1 / 8
-DATA_MEANS = np.asarray([0.16460373, -0.00396298])
