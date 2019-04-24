@@ -16,15 +16,15 @@ class ExtractStft(object):
 
     @staticmethod
     def get_stft(flac: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
-        fouriered = librosa.stft(flac, n_fft=constants.LIBRISPEECH_WINDOW_SIZE,
-                                 win_length=constants.LIBRISPEECH_WINDOW_SIZE)
+        fouriered = librosa.stft(flac, n_fft=constants.LIBRISPEECH_COMPONENTS,
+                                 hop_length=constants.LIBRISPEECH_HOP_LENGTH, center=True)
 
         mag, phase = librosa.magphase(fouriered)
         mag = np.power(mag, constants.MAGNITUDE_NONLINEARITY)
         mag_max_value = mag.max()
 
         mag = (1 - mag / mag.max()) * 255 - 127.5
-        return np.flipud(mag)[..., np.newaxis], phase, mag_max_value
+        return np.flipud(mag).copy()[..., np.newaxis], phase, mag_max_value
 
 
 class RandomCrop(object):

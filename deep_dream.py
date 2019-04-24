@@ -167,7 +167,10 @@ class Denormalize(TransformerMixin, BaseEstimator):
             out = np.power(out, 1 / constants.MAGNITUDE_NONLINEARITY)
 
             stft = out * phase
-            unfouriered = librosa.istft(stft, win_length=constants.LIBRISPEECH_WINDOW_SIZE)
+            unfouriered = librosa.istft(stft,
+                                        win_length=constants.LIBRISPEECH_COMPONENTS,
+                                        hop_length=constants.LIBRISPEECH_HOP_LENGTH,
+                                        center=True)
             unfouriered = ((unfouriered - unfouriered.min()) / (unfouriered.max() - unfouriered.min()) - 0.5) * 8
             unfouriered = np.clip(unfouriered, -1, 1)
             output.append((unfouriered, fs))
