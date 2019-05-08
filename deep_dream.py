@@ -32,46 +32,63 @@ class DataLoader(TransformerMixin, BaseEstimator):
 
 
 class DataPreprocessor(TransformerMixin, BaseEstimator):
+    def __init__(self, use_better_slower_model: bool):
+        if use_better_slower_model:
+            self._params = constants.AUDIO_PARAMS_SLOWER_BETTER_MODEL
+        else:
+            self._params = constants.AUDIO_PARAMS_FASTER_WORSE_MODEL
+
     def fit(self, x, y, **fit_params):
         return self
 
-    @classmethod
-    def transform(cls, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int, float, np.ndarray]]:
+    def transform(self, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int, float, np.ndarray]]:
         output = []
         for signal, sample_rate in x:
-            stacked, phase, mag_max_value = ExtractStft.get_stft(signal)
+            stacked, phase, mag_max_value = ExtractStft.get_stft(signal,
+                                                                 n_fft=self._params.components,
+                                                                 hop_length=self._params.hop_length,
+                                                                 window_size=self._params.window_size)
             output.append((stacked, sample_rate, mag_max_value, phase))
         return output
 
 
 class Model(TransformerMixin, BaseEstimator):
     def __init__(self,
-                 model_path: str,
+                 use_slower_better_model: bool,
                  block_name: str,
                  number_of_iterations: int,
                  optimisation_step_size: float = 1.5,
                  n_octaves: int = 4,
                  octave_scale: float = 1.4,
+                 filter_index: int = 8,
                  use_gpu: bool = False,
                  verbose: bool = False,
                  seed: Optional[int] = None):
-        self._model_path = model_path
+        if use_slower_better_model:
+            self._params = constants.AUDIO_PARAMS_SLOWER_BETTER_MODEL
+        else:
+            self._params = constants.AUDIO_PARAMS_FASTER_WORSE_MODEL
+        self._model_path = self._params.model_path.as_posix()
         self._use_gpu = use_gpu
         self._block_name = block_name
         self._n_octaves = n_octaves
         self._octave_scale = octave_scale
         self._verbose = verbose
         self._number_of_iterations = number_of_iterations
-        self._np_rng = np.random.RandomState(seed)
         self._optimisation_step_size = optimisation_step_size
+        self._filter_index = filter_index
+
+        self._np_rng = np.random.RandomState(seed)
 
         self._available_layers = {}
         self._available_layers_names = []
 
         self._classifier = Classifier(constants.NUMBER_OF_CLASSES)
+
         self._net = NeuralNet(
             self._classifier, nn.CrossEntropyLoss
         )
+
         self._net.initialize()
         self._net.load_params(f_params=self._model_path)
         self._classifier = self._classifier.eval()
@@ -142,7 +159,7 @@ class Model(TransformerMixin, BaseEstimator):
                 frame.requires_grad = True
                 self._classifier(frame[None])
 
-                layer_output = self._available_layers[self._block_name][0, 6]
+                layer_output = self._available_layers[self._block_name][0, self._filter_index]
                 objective_output = layer_output.mean()
                 objective_output.backward()
 
@@ -154,11 +171,16 @@ class Model(TransformerMixin, BaseEstimator):
 
 
 class Denormalize(TransformerMixin, BaseEstimator):
+    def __init__(self, use_slower_better_model: bool):
+        if use_slower_better_model:
+            self._params = constants.AUDIO_PARAMS_SLOWER_BETTER_MODEL
+        else:
+            self._params = constants.AUDIO_PARAMS_FASTER_WORSE_MODEL
+
     def fit(self, x, y=None, **fit_params):
         return self
 
-    @classmethod
-    def transform(cls, x: Iterable[Tuple[np.ndarray, int, float, np.ndarray]]) -> Iterable[Tuple[np.ndarray, int]]:
+    def transform(self, x: Iterable[Tuple[np.ndarray, int, float, np.ndarray]]) -> Iterable[Tuple[np.ndarray, int]]:
         output = []
         for stft, fs, mag_max_value, phase in x:
             stft = np.flipud(stft)[..., 0]
@@ -167,7 +189,10 @@ class Denormalize(TransformerMixin, BaseEstimator):
             out = np.power(out, 1 / constants.MAGNITUDE_NONLINEARITY)
 
             stft = out * phase
-            unfouriered = librosa.istft(stft, win_length=constants.LIBRISPEECH_WINDOW_SIZE)
+            unfouriered = librosa.istft(stft,
+                                        win_length=self._params.window_size,
+                                        hop_length=self._params.hop_length,
+                                        center=True)
             unfouriered = ((unfouriered - unfouriered.min()) / (unfouriered.max() - unfouriered.min()) - 0.5) * 8
             unfouriered = np.clip(unfouriered, -1, 1)
             output.append((unfouriered, fs))
@@ -191,20 +216,21 @@ class SaveResult(TransformerMixin, BaseEstimator):
         return output
 
 
-def get_processing_pipeline(model_path: str) -> Pipeline:
+def get_processing_pipeline() -> Pipeline:
+    use_better_slower_model = False
     return Pipeline([
         ("data load", DataLoader()),
-        ("data processor", DataPreprocessor()),
+        ("data processor", DataPreprocessor(use_better_slower_model=use_better_slower_model)),
         ("deep dream", Model(
+            use_slower_better_model=use_better_slower_model,
             block_name="residual_1a",
-            model_path=model_path,
             n_octaves=10,
             number_of_iterations=10,
             optimisation_step_size=0.6,
             verbose=True,
             use_gpu=False,
         )),
-        ("denormalize", Denormalize()),
+        ("denormalize", Denormalize(use_slower_better_model=use_better_slower_model)),
         ("data saver", SaveResult(".", "audio"))
     ])
 
@@ -212,11 +238,10 @@ def get_processing_pipeline(model_path: str) -> Pipeline:
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("model_path", help="Path to model")
     parser.add_argument("file_path", help="Path to .wav file to process")
     args = parser.parse_args()
 
-    pipe = get_processing_pipeline(args.model_path)
+    pipe = get_processing_pipeline()
     print(pipe.transform([args.file_path]))
 
 
