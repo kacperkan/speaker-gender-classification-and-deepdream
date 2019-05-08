@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Optional, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import librosa
 import numpy as np
@@ -10,14 +10,22 @@ import constants
 
 
 class ExtractStft(object):
+    def __init__(self, n_fft: int, hop_length: int, window_size: int):
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.window_size = window_size
+
     def __call__(self, flac: np.ndarray) -> np.ndarray:
-        stft, _, _ = ExtractStft.get_stft(flac)
+        stft, _, _ = ExtractStft.get_stft(flac, n_fft=self.n_fft, hop_length=self.hop_length,
+                                          window_size=self.window_size)
         return stft
 
     @staticmethod
-    def get_stft(flac: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
-        fouriered = librosa.stft(flac, n_fft=constants.LIBRISPEECH_COMPONENTS,
-                                 hop_length=constants.LIBRISPEECH_HOP_LENGTH, center=True)
+    def get_stft(flac: np.ndarray, *,
+                 n_fft: int = 512,
+                 hop_length: int = 128,
+                 window_size: int = 512) -> Tuple[np.ndarray, np.ndarray, float]:
+        fouriered = librosa.stft(flac, n_fft=n_fft, hop_length=hop_length, win_length=window_size, center=True)
 
         mag, phase = librosa.magphase(fouriered)
         mag = np.power(mag, constants.MAGNITUDE_NONLINEARITY)
