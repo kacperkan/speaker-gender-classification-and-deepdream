@@ -26,7 +26,8 @@ class DataLoader(TransformerMixin, BaseEstimator):
     def transform(cls, x: Iterable[str]) -> Iterable[Tuple[np.ndarray, int]]:
         output = []
         for file_name in x:
-            signal, sample_rate = librosa.load(file_name, sr=constants.LIBRISPEECH_SAMPLE_RATE)
+            signal, sample_rate = librosa.load(file_name,
+                                               sr=constants.LIBRISPEECH_SAMPLE_RATE)
             output.append((signal, sample_rate))
         return output
 
@@ -41,7 +42,8 @@ class DataPreprocessor(TransformerMixin, BaseEstimator):
     def fit(self, x, y, **fit_params):
         return self
 
-    def transform(self, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int, float, np.ndarray]]:
+    def transform(self, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[
+        Tuple[np.ndarray, int, float, np.ndarray]]:
         output = []
         for signal, sample_rate in x:
             stacked, phase, mag_max_value = ExtractStft.get_stft(signal,
@@ -95,7 +97,8 @@ class Model(TransformerMixin, BaseEstimator):
 
         for layer_name, layer in self._classifier.layers_blocks.items():
             if "residual" in layer_name:
-                current_register = partial(self._register_layer_output, layer_name=layer_name)
+                current_register = partial(self._register_layer_output,
+                                           layer_name=layer_name)
                 layer.register_forward_hook(current_register)
                 self._available_layers_names.append(layer_name)
 
@@ -120,7 +123,10 @@ class Model(TransformerMixin, BaseEstimator):
         octaves = []
         for i in range(self._n_octaves - 1):
             hw = stft.shape[:2]
-            lo = cv2.resize(stft, tuple(np.int32(np.float32(hw[::-1]) / self._octave_scale)))[..., None]
+            lo = \
+                cv2.resize(stft,
+                           tuple(np.int32(np.float32(hw[::-1]) / self._octave_scale)))[
+                    ..., None]
             hi = stft - cv2.resize(lo, tuple(np.int32(hw[::-1])))[..., None]
             stft = lo
             octaves.append(hi)
@@ -128,7 +134,8 @@ class Model(TransformerMixin, BaseEstimator):
         for octave in tqdm.trange(self._n_octaves, desc="Image optimisation"):
             if octave > 0:
                 hi = octaves[-octave]
-                stft = cv2.resize(stft, tuple(np.int32(hi.shape[:2][::-1])))[..., None] + hi
+                stft = cv2.resize(stft, tuple(np.int32(hi.shape[:2][::-1])))[
+                           ..., None] + hi
 
             stft = torch.from_numpy(stft).float()
             if self._use_gpu:
@@ -159,7 +166,8 @@ class Model(TransformerMixin, BaseEstimator):
                 frame.requires_grad = True
                 self._classifier(frame[None])
 
-                layer_output = self._available_layers[self._block_name][0, self._filter_index]
+                layer_output = self._available_layers[self._block_name][
+                    0, self._filter_index]
                 objective_output = layer_output.mean()
                 objective_output.backward()
 
@@ -180,7 +188,8 @@ class Denormalize(TransformerMixin, BaseEstimator):
     def fit(self, x, y=None, **fit_params):
         return self
 
-    def transform(self, x: Iterable[Tuple[np.ndarray, int, float, np.ndarray]]) -> Iterable[Tuple[np.ndarray, int]]:
+    def transform(self, x: Iterable[Tuple[np.ndarray, int, float, np.ndarray]]) -> \
+            Iterable[Tuple[np.ndarray, int]]:
         output = []
         for stft, fs, mag_max_value, phase in x:
             stft = np.flipud(stft)[..., 0]
@@ -193,7 +202,8 @@ class Denormalize(TransformerMixin, BaseEstimator):
                                         win_length=self._params.window_size,
                                         hop_length=self._params.hop_length,
                                         center=True)
-            unfouriered = ((unfouriered - unfouriered.min()) / (unfouriered.max() - unfouriered.min()) - 0.5) * 8
+            unfouriered = ((unfouriered - unfouriered.min()) / (
+                    unfouriered.max() - unfouriered.min()) - 0.5) * 8
             unfouriered = np.clip(unfouriered, -1, 1)
             output.append((unfouriered, fs))
         return output
@@ -207,7 +217,8 @@ class SaveResult(TransformerMixin, BaseEstimator):
     def fit(self, x, y=None, **fit_params):
         return self
 
-    def transform(self, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[Tuple[np.ndarray, int]]:
+    def transform(self, x: Iterable[Tuple[np.ndarray, int]]) -> Iterable[
+        Tuple[np.ndarray, int]]:
         output = []
         for i, (signal, fs) in enumerate(x):
             path = os.path.join(self.output_dir, self.base_name + "_{}.wav".format(i))
@@ -216,32 +227,55 @@ class SaveResult(TransformerMixin, BaseEstimator):
         return output
 
 
-def get_processing_pipeline() -> Pipeline:
+def get_processing_pipeline(layer: str, n_scales: int, iterations: int,
+                            output_dir: str, output_base_name: str) -> Pipeline:
     use_better_slower_model = False
     return Pipeline([
         ("data load", DataLoader()),
-        ("data processor", DataPreprocessor(use_better_slower_model=use_better_slower_model)),
+        ("data processor",
+         DataPreprocessor(use_better_slower_model=use_better_slower_model)),
         ("deep dream", Model(
             use_slower_better_model=use_better_slower_model,
-            block_name="residual_1a",
-            n_octaves=10,
-            number_of_iterations=10,
+            block_name=layer,
+            n_octaves=n_scales,
+            number_of_iterations=iterations,
             optimisation_step_size=0.6,
             verbose=True,
             use_gpu=False,
         )),
         ("denormalize", Denormalize(use_slower_better_model=use_better_slower_model)),
-        ("data saver", SaveResult(".", "audio"))
+        ("data saver", SaveResult(output_dir, output_base_name))
     ])
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("file_path", help="Path to .wav file to process")
+    parser.add_argument("-f", "--file_path", help="Path to .wav file to process")
+    parser.add_argument("-l", "--layer", help="Layer to use during gradient calculation.\n"
+                                              "Available are: 'residual_1a', "
+                                              "'residual_2a', "
+                                              "'residual_2b', "
+                                              "'residual_3a', "
+                                              "'residual_3b', "
+                                              "'residual_4a', "
+                                              "'residual_4b', "
+                                              "'residual_5a', "
+                                              "'residual_5b'", default="residual_1a")
+    parser.add_argument("-n", "--n_scales", type=int,
+                        help="Number of scales down of an spectrogram.")
+    parser.add_argument("-i", "--iterations", type=int,
+                        help="Number of iterations to perform"
+                             "gradient calculation", default=10)
+    parser.add_argument("-d", "--output_dir", type=str,
+                        help="Output directory of files")
+    parser.add_argument("-o", "--output_file", type=str,
+                        help="Output base name for a file. It allows to use batched"
+                             "processing of audio samples in this way.")
     args = parser.parse_args()
 
-    pipe = get_processing_pipeline()
+    pipe = get_processing_pipeline(args.layer, args.n_scales,
+                                   args.iterations, args.output_dir, args.output_file)
     print(pipe.transform([args.file_path]))
 
 
