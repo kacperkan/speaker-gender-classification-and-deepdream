@@ -26,7 +26,7 @@ How does it work?:
     3. Calculated gradient is added to aggregated matrix o gradients
     4. The image is scaled up by x2 and procedure repeats until the image is the
     of the original one
-3. Aggregated gradients are added to the original image and is combined
+3. Aggregated gradients are added to the original image and are combined
 with the original phase
 4. The audio is restored using inverse FFT
 
